@@ -1,0 +1,6 @@
+{
+  "name": "Unified Loyalty SaaS Platform",
+  "description": "Production-ready, multi-tenant Loyalty-as-a-Service SaaS platform with role-based dashboards for Customers, Cashiers, Merchants, and Admins.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
