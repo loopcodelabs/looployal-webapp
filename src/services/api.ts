@@ -116,7 +116,7 @@ export const api = {
       body: JSON.stringify({ membershipId, billNumber, billAmount }),
     }),
 
-  creditPoints: (membershipId: string, billNumber: string, billAmount: number, otp: string) =>
+  creditPoints: (membershipId: string, billNumber: string, billAmount: number) =>
     apiRequest<{
       success: boolean;
       message: string;
@@ -124,7 +124,7 @@ export const api = {
       updatedWallet: any;
     }>('/api/v1/cashier/points/credit', {
       method: 'POST',
-      body: JSON.stringify({ membershipId, billNumber, billAmount, otp }),
+      body: JSON.stringify({ membershipId, billNumber, billAmount }),
     }),
 
   requestRedemptionOTP: (membershipId: string, pointsToRedeem: number) =>

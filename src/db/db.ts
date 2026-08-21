@@ -18,7 +18,7 @@ import {
   AuditLog,
   SMSLog
 } from '../types';
-import { testMySQLConnection, initializeMySQLSchema, queryMySQL } from './mysql';
+import { testMySQLConnection, initializeMySQLSchema, queryMySQL, formatToMySQLDateTime } from './mysql';
 import { notificationService } from '../services/notifications/NotificationService';
 import { otpService } from '../services/otp/OTPService';
 
@@ -58,16 +58,17 @@ class LoyaltyDatabase {
     }
 
     try {
-      await initializeMySQLSchema();
-      const rows = await queryMySQL<{ cnt: number }>('SELECT COUNT(*) as cnt FROM users');
-      if (rows && rows[0] && rows[0].cnt > 0) {
-        console.log('[DB] Loading existing persistent records from MySQL database...');
-        await this.loadFromMySQL();
-      } else {
-        console.log('[DB] MySQL database empty. Syncing seed data into MySQL tables...');
-        await this.persistAllSeedToMySQL();
-      }
       this.isMySQLConnected = true;
+      await initializeMySQLSchema();
+
+      // First hydrate in-memory store from existing persistent MySQL database
+      console.log('[DB] Loading existing persistent records from MySQL database...');
+      await this.loadFromMySQL();
+
+      // Ensure core business tenants and seed accounts exist in MySQL if not already present
+      console.log('[DB] Ensuring core business tenants and seed accounts exist in MySQL...');
+      await this.persistAllSeedToMySQL();
+
       console.log('[DB] Real-time MySQL database persistence initialized & active!');
       return true;
     } catch (err: any) {
@@ -85,7 +86,9 @@ class LoyaltyDatabase {
     for (const c of this.customers.values()) await this.persistCustomer(c);
     for (const m of this.memberships.values()) await this.persistMembership(m);
     for (const w of this.wallets.values()) await this.persistWallet(w);
+    for (const r of this.rewards.values()) await this.persistReward(r);
     for (const tx of this.transactions) await this.persistTransaction(tx);
+    for (const cfg of this.smsConfigs.values()) await this.persistMerchantSmsConfig(cfg);
     for (const log of this.auditLogs) await this.persistAuditLog(log);
   }
 
@@ -136,6 +139,22 @@ class LoyaltyDatabase {
           createdAt: br.created_at,
         });
       });
+
+      try {
+        const dbEmp = await queryMySQL<any>('SELECT * FROM employees');
+        dbEmp.forEach((e) => {
+          this.employees.set(e.id, {
+            id: e.id,
+            userId: e.user_id,
+            businessId: e.business_id,
+            branchId: e.branch_id,
+            employeeCode: e.employee_code,
+            role: e.role,
+            isActive: Boolean(e.is_active),
+            createdAt: e.created_at,
+          });
+        });
+      } catch {}
 
       const dbCust = await queryMySQL<any>('SELECT * FROM customers');
       dbCust.forEach((c) => {
@@ -209,6 +228,94 @@ class LoyaltyDatabase {
         branchName: t.branch_name,
         cashierName: t.cashier_name,
       }));
+
+      try {
+        const dbRewards = await queryMySQL<any>('SELECT * FROM rewards');
+        dbRewards.forEach((r) => {
+          this.rewards.set(r.id, {
+            id: r.id,
+            merchantId: r.merchant_id,
+            name: r.name,
+            description: r.description || '',
+            pointsRequired: Number(r.points_required),
+            cashValue: r.cash_value ? Number(r.cash_value) : 0,
+            productName: r.product_name || r.name || '',
+            stockQuantity: r.stock_quantity ? Number(r.stock_quantity) : 999,
+            type: r.type || 'PRODUCT',
+            status: r.is_active === 0 || r.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
+            createdAt: r.created_at,
+            updatedAt: r.updated_at,
+          });
+        });
+      } catch {}
+
+      try {
+        const dbRedemptions = await queryMySQL<any>('SELECT * FROM redemptions');
+        dbRedemptions.forEach((rdm) => {
+          this.redemptions.set(rdm.id, {
+            id: rdm.id,
+            merchantId: rdm.merchant_id,
+            customerId: rdm.customerId,
+            customerMerchantLoyaltyAccountId: rdm.customer_merchant_loyalty_account_id,
+            rewardId: rdm.reward_id,
+            rewardName: rdm.reward_name,
+            rewardType: rdm.reward_type,
+            pointsRedeemed: Number(rdm.points_redeemed),
+            cashValue: rdm.cash_value ? Number(rdm.cash_value) : undefined,
+            status: rdm.status,
+            processedByEmployeeId: rdm.processed_by_employee_id,
+            notes: rdm.notes,
+            createdAt: rdm.created_at,
+            updatedAt: rdm.updated_at,
+          });
+        });
+      } catch {}
+
+      try {
+        const dbConfigs = await queryMySQL<any>('SELECT * FROM merchant_sms_configs');
+        dbConfigs.forEach((cfg) => {
+          this.smsConfigs.set(cfg.merchant_id, {
+            id: cfg.id,
+            merchantId: cfg.merchant_id,
+            provider: cfg.provider,
+            senderId: cfg.sender_id,
+            dlTEntityId: cfg.dlt_entity_id,
+            transactionTemplateId: cfg.transaction_template_id,
+            otpTemplateId: cfg.otp_template_id,
+            welcomeTemplateId: cfg.welcome_template_id,
+            enabled: Boolean(cfg.enabled),
+            createdAt: cfg.created_at,
+            updatedAt: cfg.updated_at,
+          });
+        });
+      } catch {}
+
+      try {
+        const dbAudit = await queryMySQL<any>('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 500');
+        this.auditLogs = dbAudit.map((a) => ({
+          id: a.id,
+          businessId: a.business_id,
+          actorUserId: a.actor_user_id,
+          actorRole: a.actor_role,
+          action: a.action,
+          details: a.details,
+          ipAddress: a.ip_address,
+          timestamp: a.timestamp,
+          businessName: a.business_name,
+          actorName: a.actor_name,
+        }));
+      } catch {}
+
+      try {
+        const dbSMS = await queryMySQL<any>('SELECT * FROM sms_logs ORDER BY created_at DESC LIMIT 200');
+        this.smsLogs = dbSMS.map((s) => ({
+          id: s.id,
+          recipientMobile: s.recipient_mobile,
+          message: s.message,
+          status: s.status,
+          createdAt: s.created_at,
+        }));
+      } catch {}
     } catch (err: any) {
       console.warn('[DB] Error loading MySQL tables into memory:', err.message);
     }
@@ -218,113 +325,748 @@ class LoyaltyDatabase {
   private async persistUser(u: User) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO users (id, email, mobile_number, full_name, role, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE email=?, mobile_number=?, full_name=?, role=?, is_active=?, updated_at=?`,
-        [u.id, u.email, u.mobileNumber, u.fullName, u.role, u.isActive ? 1 : 0, u.createdAt, u.updatedAt,
-         u.email, u.mobileNumber, u.fullName, u.role, u.isActive ? 1 : 0, u.updatedAt]
-      );
+      const createdAt = formatToMySQLDateTime(u.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(u.updatedAt) || createdAt;
+
+      // Check if user already exists by exact ID or unique mobile/email
+      let existing: any = null;
+      if (u.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM users WHERE id = ?', [u.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && u.mobileNumber) {
+        const rows = await queryMySQL<any>('SELECT id FROM users WHERE mobile_number = ?', [u.mobileNumber]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && u.email) {
+        const rows = await queryMySQL<any>('SELECT id FROM users WHERE email = ?', [u.email]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      if (existing) {
+        await queryMySQL(
+          `UPDATE users SET email = COALESCE(?, email), mobile_number = COALESCE(?, mobile_number), full_name = ?, role = ?, is_active = ?, updated_at = ? WHERE id = ?`,
+          [u.email ?? null, u.mobileNumber ?? null, u.fullName, u.role, u.isActive ? 1 : 0, updatedAt, existing.id]
+        );
+        if (existing.id !== u.id) {
+          const oldId = u.id;
+          const realId = existing.id;
+          u.id = realId;
+          this.users.set(realId, u);
+          this.users.delete(oldId);
+
+          for (const c of this.customers.values()) {
+            if (c.userId === oldId) c.userId = realId;
+          }
+          for (const e of this.employees.values()) {
+            if (e.userId === oldId) e.userId = realId;
+          }
+          for (const tx of this.transactions) {
+            if (tx.cashierUserId === oldId) tx.cashierUserId = realId;
+          }
+          for (const log of this.auditLogs) {
+            if (log.actorUserId === oldId) log.actorUserId = realId;
+          }
+        }
+      } else {
+        await queryMySQL(
+          `INSERT INTO users (id, email, mobile_number, full_name, role, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE email=VALUES(email), mobile_number=VALUES(mobile_number), full_name=VALUES(full_name), role=VALUES(role), is_active=VALUES(is_active), updated_at=VALUES(updated_at)`,
+          [u.id, u.email ?? null, u.mobileNumber ?? null, u.fullName, u.role, u.isActive ? 1 : 0, createdAt, updatedAt]
+        );
+      }
     } catch (e: any) { console.warn('User MySQL sync failed:', e.message); }
   }
 
   private async persistBusiness(b: Business) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO businesses (id, name, code, logo_url, category, reward_percentage, min_redeem_points, point_value_in_currency, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name=?, logo_url=?, category=?, reward_percentage=?, min_redeem_points=?, point_value_in_currency=?, is_active=?, updated_at=?`,
-        [b.id, b.name, b.code, b.logoUrl, b.category, b.rewardPercentage, b.minRedeemPoints, b.pointValueInCurrency, b.isActive ? 1 : 0, b.createdAt, b.updatedAt,
-         b.name, b.logoUrl, b.category, b.rewardPercentage, b.minRedeemPoints, b.pointValueInCurrency, b.isActive ? 1 : 0, b.updatedAt]
-      );
+      const createdAt = formatToMySQLDateTime(b.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(b.updatedAt) || createdAt;
+
+      // Check if business already exists by ID or unique code
+      let existing: any = null;
+      if (b.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [b.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && b.code) {
+        const rows = await queryMySQL<any>('SELECT id FROM businesses WHERE code = ?', [b.code]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      if (existing) {
+        await queryMySQL(
+          `UPDATE businesses SET name = ?, logo_url = ?, category = ?, reward_percentage = ?, min_redeem_points = ?, point_value_in_currency = ?, is_active = ?, updated_at = ? WHERE id = ?`,
+          [b.name, b.logoUrl ?? null, b.category ?? null, b.rewardPercentage ?? 5, b.minRedeemPoints ?? 100, b.pointValueInCurrency ?? 1.0, b.isActive ? 1 : 0, updatedAt, existing.id]
+        );
+        if (existing.id !== b.id) {
+          const oldId = b.id;
+          const realId = existing.id;
+          b.id = realId;
+          this.businesses.set(realId, b);
+          this.businesses.delete(oldId);
+
+          for (const br of this.branches.values()) {
+            if (br.businessId === oldId) br.businessId = realId;
+          }
+          for (const emp of this.employees.values()) {
+            if (emp.businessId === oldId) emp.businessId = realId;
+          }
+          for (const mem of this.memberships.values()) {
+            if (mem.businessId === oldId) mem.businessId = realId;
+          }
+          for (const wal of this.wallets.values()) {
+            if (wal.businessId === oldId) wal.businessId = realId;
+          }
+          for (const tx of this.transactions) {
+            if (tx.businessId === oldId) tx.businessId = realId;
+          }
+          for (const r of this.rewards.values()) {
+            if (r.merchantId === oldId) r.merchantId = realId;
+          }
+          for (const rdm of this.redemptions.values()) {
+            if (rdm.merchantId === oldId) rdm.merchantId = realId;
+          }
+          for (const cfg of this.smsConfigs.values()) {
+            if (cfg.merchantId === oldId) cfg.merchantId = realId;
+          }
+          for (const log of this.auditLogs) {
+            if (log.businessId === oldId) log.businessId = realId;
+          }
+        }
+      } else {
+        await queryMySQL(
+          `INSERT INTO businesses (id, name, code, logo_url, category, reward_percentage, min_redeem_points, point_value_in_currency, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE name=VALUES(name), logo_url=VALUES(logo_url), category=VALUES(category), reward_percentage=VALUES(reward_percentage), min_redeem_points=VALUES(min_redeem_points), point_value_in_currency=VALUES(point_value_in_currency), is_active=VALUES(is_active), updated_at=VALUES(updated_at)`,
+          [b.id, b.name, b.code, b.logoUrl ?? null, b.category ?? null, b.rewardPercentage ?? 5, b.minRedeemPoints ?? 100, b.pointValueInCurrency ?? 1.0, b.isActive ? 1 : 0, createdAt, updatedAt]
+        );
+      }
     } catch (e: any) { console.warn('Business MySQL sync failed:', e.message); }
   }
 
   private async persistBranch(br: Branch) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO branches (id, business_id, name, code, address, city, phone, is_active, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name=?, address=?, city=?, phone=?, is_active=?`,
-        [br.id, br.businessId, br.name, br.code, br.address, br.city, br.phone, br.isActive ? 1 : 0, br.createdAt,
-         br.name, br.address, br.city, br.phone, br.isActive ? 1 : 0]
-      );
+      // Ensure parent business exists and get real businessId
+      let realBizId = br.businessId;
+      let bizRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [br.businessId]);
+      if (bizRows.length > 0) {
+        realBizId = bizRows[0].id;
+      } else {
+        const biz = this.businesses.get(br.businessId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          realBizId = biz.id;
+        }
+      }
+      bizRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [realBizId]);
+      if (bizRows.length === 0) {
+        console.warn(`Cannot persist branch ${br.id}: business ${realBizId} not found in MySQL`);
+        return;
+      }
+      br.businessId = realBizId;
+
+      // Check if branch already exists in MySQL (by id or business_id + code)
+      let existing: any = null;
+      if (br.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM branches WHERE id = ?', [br.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && realBizId && br.code) {
+        const rows = await queryMySQL<any>('SELECT id FROM branches WHERE business_id = ? AND code = ?', [realBizId, br.code]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      const createdAt = formatToMySQLDateTime(br.createdAt) || formatToMySQLDateTime(new Date());
+
+      if (existing) {
+        try {
+          await queryMySQL(
+            `UPDATE branches SET business_id = ?, name = ?, code = ?, address = ?, city = ?, phone = ?, is_active = ? WHERE id = ?`,
+            [realBizId, br.name, br.code, br.address ?? null, br.city ?? null, br.phone ?? null, br.isActive ? 1 : 0, existing.id]
+          );
+        } catch {
+          await queryMySQL(
+            `UPDATE branches SET business_id = ?, name = ?, code = ?, address = ?, city = ?, phone = ? WHERE id = ?`,
+            [realBizId, br.name, br.code, br.address ?? null, br.city ?? null, br.phone ?? null, existing.id]
+          );
+        }
+        if (existing.id !== br.id) {
+          const oldId = br.id;
+          const realId = existing.id;
+          br.id = realId;
+          this.branches.set(realId, br);
+          this.branches.delete(oldId);
+
+          for (const emp of this.employees.values()) {
+            if (emp.branchId === oldId) emp.branchId = realId;
+          }
+          for (const tx of this.transactions) {
+            if (tx.branchId === oldId) tx.branchId = realId;
+          }
+        }
+      } else {
+        try {
+          await queryMySQL(
+            `INSERT INTO branches (id, business_id, name, code, address, city, phone, is_active, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [br.id, realBizId, br.name, br.code, br.address ?? null, br.city ?? null, br.phone ?? null, br.isActive ? 1 : 0, createdAt]
+          );
+        } catch (colErr: any) {
+          await queryMySQL(
+            `INSERT INTO branches (id, business_id, name, code, address, city, phone, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [br.id, realBizId, br.name, br.code, br.address ?? null, br.city ?? null, br.phone ?? null, createdAt]
+          );
+        }
+      }
     } catch (e: any) { console.warn('Branch MySQL sync failed:', e.message); }
   }
 
   private async persistEmployee(e: Employee) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO employees (id, user_id, business_id, branch_id, employee_code, role, is_active, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE branch_id=?, role=?, is_active=?`,
-        [e.id, e.userId, e.businessId, e.branchId, e.employeeCode, e.role, e.isActive ? 1 : 0, e.createdAt,
-         e.branchId, e.role, e.isActive ? 1 : 0]
-      );
+      // 1. Resolve User
+      let realUserId = e.userId;
+      let uRows = await queryMySQL<any>('SELECT id FROM users WHERE id = ?', [e.userId]);
+      if (uRows.length > 0) {
+        realUserId = uRows[0].id;
+      } else {
+        const u = this.users.get(e.userId);
+        if (u) {
+          await this.persistUser(u);
+          realUserId = u.id;
+        }
+      }
+      uRows = await queryMySQL<any>('SELECT id FROM users WHERE id = ?', [realUserId]);
+      if (uRows.length === 0) {
+        console.warn(`Cannot persist employee ${e.id}: user ${realUserId} not found in MySQL`);
+        return;
+      }
+      e.userId = realUserId;
+
+      // 2. Resolve Business
+      let realBizId = e.businessId;
+      let bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [e.businessId]);
+      if (bRows.length > 0) {
+        realBizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(e.businessId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          realBizId = biz.id;
+        }
+      }
+      bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [realBizId]);
+      if (bRows.length === 0) {
+        console.warn(`Cannot persist employee ${e.id}: business ${realBizId} not found in MySQL`);
+        return;
+      }
+      e.businessId = realBizId;
+
+      // 3. Resolve Branch
+      let realBranchId = e.branchId ?? null;
+      if (realBranchId) {
+        const brRows = await queryMySQL<any>('SELECT id FROM branches WHERE id = ?', [realBranchId]);
+        if (brRows.length === 0) {
+          const br = this.branches.get(realBranchId);
+          if (br) {
+            await this.persistBranch(br);
+            realBranchId = br.id;
+          } else {
+            realBranchId = null;
+          }
+        }
+      }
+      e.branchId = realBranchId;
+
+      // 4. Check if employee already exists in MySQL
+      let existing: any = null;
+      if (e.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM employees WHERE id = ?', [e.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && realBizId && e.employeeCode) {
+        const rows = await queryMySQL<any>('SELECT id FROM employees WHERE business_id = ? AND employee_code = ?', [realBizId, e.employeeCode]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && realBizId && realUserId) {
+        const rows = await queryMySQL<any>('SELECT id FROM employees WHERE business_id = ? AND user_id = ?', [realBizId, realUserId]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      const createdAt = formatToMySQLDateTime(e.createdAt) || formatToMySQLDateTime(new Date());
+
+      if (existing) {
+        try {
+          await queryMySQL(
+            `UPDATE employees SET user_id = ?, business_id = ?, branch_id = ?, employee_code = ?, role = ?, is_active = ? WHERE id = ?`,
+            [realUserId, realBizId, realBranchId, e.employeeCode, e.role, e.isActive ? 1 : 0, existing.id]
+          );
+        } catch {
+          await queryMySQL(
+            `UPDATE employees SET user_id = ?, business_id = ?, branch_id = ?, employee_code = ?, role = ? WHERE id = ?`,
+            [realUserId, realBizId, realBranchId, e.employeeCode, e.role, existing.id]
+          );
+        }
+        if (existing.id !== e.id) {
+          const oldId = e.id;
+          const realId = existing.id;
+          e.id = realId;
+          this.employees.set(realId, e);
+          this.employees.delete(oldId);
+        }
+      } else {
+        try {
+          await queryMySQL(
+            `INSERT INTO employees (id, user_id, business_id, branch_id, employee_code, role, is_active, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [e.id, realUserId, realBizId, realBranchId, e.employeeCode, e.role, e.isActive ? 1 : 0, createdAt]
+          );
+        } catch (colErr: any) {
+          await queryMySQL(
+            `INSERT INTO employees (id, user_id, business_id, branch_id, employee_code, role, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [e.id, realUserId, realBizId, realBranchId, e.employeeCode, e.role, createdAt]
+          );
+        }
+      }
     } catch (e: any) { console.warn('Employee MySQL sync failed:', e.message); }
   }
 
   private async persistCustomer(c: Customer) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO customers (id, user_id, mobile_number, name, email, universal_qr_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name=?, email=?, universal_qr_code=?`,
-        [c.id, c.userId, c.mobileNumber, c.name, c.email, c.universalQrCode, c.createdAt,
-         c.name, c.email, c.universalQrCode]
+      // 1. Resolve or create parent User in MySQL
+      let realUserId = c.userId;
+      const uRows = await queryMySQL<any>(
+        'SELECT id FROM users WHERE id = ? OR (mobile_number IS NOT NULL AND mobile_number = ?)',
+        [c.userId, c.mobileNumber]
       );
+      if (uRows.length > 0) {
+        realUserId = uRows[0].id;
+      } else {
+        let u = this.users.get(c.userId);
+        if (!u) {
+          u = {
+            id: c.userId || `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            email: c.email || null,
+            mobileNumber: c.mobileNumber,
+            fullName: c.name,
+            role: 'CUSTOMER',
+            isActive: true,
+            createdAt: c.createdAt,
+            updatedAt: c.createdAt,
+          };
+          this.users.set(u.id, u);
+        }
+        await this.persistUser(u);
+        realUserId = u.id;
+      }
+      c.userId = realUserId;
+
+      // 2. Check if customer already exists in MySQL (by id, mobile_number, or user_id)
+      let existing: any = null;
+      if (c.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM customers WHERE id = ?', [c.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && c.mobileNumber) {
+        const rows = await queryMySQL<any>('SELECT id FROM customers WHERE mobile_number = ?', [c.mobileNumber]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && realUserId) {
+        const rows = await queryMySQL<any>('SELECT id FROM customers WHERE user_id = ?', [realUserId]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      const createdAt = formatToMySQLDateTime(c.createdAt) || formatToMySQLDateTime(new Date());
+
+      if (existing) {
+        await queryMySQL(
+          `UPDATE customers SET user_id = ?, mobile_number = ?, name = ?, email = COALESCE(?, email), universal_qr_code = COALESCE(?, universal_qr_code) WHERE id = ?`,
+          [realUserId, c.mobileNumber, c.name, c.email ?? null, c.universalQrCode ?? null, existing.id]
+        );
+        if (existing.id !== c.id) {
+          const oldId = c.id;
+          const realId = existing.id;
+          c.id = realId;
+          this.customers.set(realId, c);
+          this.customers.delete(oldId);
+
+          for (const m of this.memberships.values()) {
+            if (m.customerId === oldId) m.customerId = realId;
+          }
+          for (const w of this.wallets.values()) {
+            if (w.customerId === oldId) w.customerId = realId;
+          }
+          for (const rdm of this.redemptions.values()) {
+            if (rdm.customerId === oldId) rdm.customerId = realId;
+          }
+        }
+      } else {
+        try {
+          await queryMySQL(
+            `INSERT INTO customers (id, user_id, mobile_number, name, email, universal_qr_code, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [c.id, realUserId, c.mobileNumber, c.name, c.email ?? null, c.universalQrCode ?? null, createdAt]
+          );
+        } catch (colErr: any) {
+          await queryMySQL(
+            `INSERT INTO customers (id, user_id, mobile_number, name, email, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [c.id, realUserId, c.mobileNumber, c.name, c.email ?? null, createdAt]
+          );
+        }
+      }
     } catch (e: any) { console.warn('Customer MySQL sync failed:', e.message); }
   }
 
   private async persistMembership(m: BusinessMembership) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO business_memberships (id, customer_id, business_id, membership_code, status, joined_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE status=?`,
-        [m.id, m.customerId, m.businessId, m.membershipCode, m.status, m.joinedAt, m.status]
-      );
+      // 1. Resolve Customer ID
+      let custId = m.customerId;
+      let cRows = await queryMySQL<any>('SELECT id FROM customers WHERE id = ?', [m.customerId]);
+      if (cRows.length > 0) {
+        custId = cRows[0].id;
+      } else {
+        const cust = this.customers.get(m.customerId);
+        if (cust) {
+          await this.persistCustomer(cust);
+          custId = cust.id;
+        }
+      }
+      cRows = await queryMySQL<any>('SELECT id FROM customers WHERE id = ?', [custId]);
+      if (cRows.length === 0) {
+        console.warn(`Cannot persist membership ${m.id}: customer ${custId} not found in MySQL`);
+        return;
+      }
+      m.customerId = custId;
+
+      // 2. Resolve Business ID
+      let bizId = m.businessId;
+      let bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [m.businessId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(m.businessId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [bizId]);
+      if (bRows.length === 0) {
+        console.warn(`Cannot persist membership ${m.id}: business ${bizId} not found in MySQL`);
+        return;
+      }
+      m.businessId = bizId;
+
+      // 3. Check if membership already exists in MySQL (by id, membership_code, or customer_id + business_id)
+      let existing: any = null;
+      if (m.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM business_memberships WHERE id = ?', [m.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && m.membershipCode) {
+        const rows = await queryMySQL<any>('SELECT id FROM business_memberships WHERE membership_code = ?', [m.membershipCode]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && custId && bizId) {
+        const rows = await queryMySQL<any>('SELECT id FROM business_memberships WHERE customer_id = ? AND business_id = ?', [custId, bizId]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      const joinedAt = formatToMySQLDateTime(m.joinedAt) || formatToMySQLDateTime(new Date());
+
+      if (existing) {
+        await queryMySQL(
+          `UPDATE business_memberships SET customer_id = ?, business_id = ?, membership_code = ?, status = ? WHERE id = ?`,
+          [custId, bizId, m.membershipCode, m.status, existing.id]
+        );
+        if (existing.id !== m.id) {
+          const oldId = m.id;
+          const realId = existing.id;
+          m.id = realId;
+          this.memberships.set(realId, m);
+          this.memberships.delete(oldId);
+
+          for (const w of this.wallets.values()) {
+            if (w.membershipId === oldId) w.membershipId = realId;
+          }
+          for (const tx of this.transactions) {
+            if (tx.membershipId === oldId) tx.membershipId = realId;
+          }
+        }
+      } else {
+        await queryMySQL(
+          `INSERT INTO business_memberships (id, customer_id, business_id, membership_code, status, joined_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [m.id, custId, bizId, m.membershipCode, m.status, joinedAt]
+        );
+      }
     } catch (e: any) { console.warn('Membership MySQL sync failed:', e.message); }
   }
 
-  private async persistWallet(w: RewardAccount) {
+  private async persistWallet(w: RewardAccount | Wallet) {
     if (!this.isMySQLConnected) return;
     try {
-      await queryMySQL(
-        `INSERT INTO reward_accounts (id, membership_id, customer_id, business_id, balance, currency, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE balance=?, updated_at=?`,
-        [w.id, w.membershipId, w.customerId, w.businessId, w.balance, w.currency || 'Points', w.updatedAt,
-         w.balance, w.updatedAt]
-      );
-    } catch (e: any) { console.warn('Reward Account MySQL sync failed:', e.message); }
+      // 1. Resolve parent Business
+      let bizId = w.businessId;
+      let bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [w.businessId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(w.businessId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [bizId]);
+      if (bRows.length === 0) {
+        console.warn(`Cannot persist wallet ${w.id}: business ${bizId} not found in MySQL`);
+        return;
+      }
+      w.businessId = bizId;
+
+      // 2. Resolve parent Membership
+      let memId = w.membershipId;
+      let mRows = await queryMySQL<any>('SELECT id, customer_id FROM business_memberships WHERE id = ?', [w.membershipId]);
+      if (mRows.length > 0) {
+        memId = mRows[0].id;
+      } else {
+        const mem = this.memberships.get(w.membershipId);
+        if (mem) {
+          await this.persistMembership(mem);
+          memId = mem.id;
+        }
+      }
+      mRows = await queryMySQL<any>('SELECT id, customer_id FROM business_memberships WHERE id = ?', [memId]);
+      if (mRows.length === 0) {
+        console.warn(`Cannot persist wallet ${w.id}: membership ${memId} not found in MySQL`);
+        return;
+      }
+      w.membershipId = memId;
+      const customerId = w.customerId ?? mRows[0].customer_id ?? null;
+
+      // 3. Check if reward_account already exists in MySQL (by id or by membership_id)
+      let existing: any = null;
+      if (w.id) {
+        const rows = await queryMySQL<any>('SELECT id FROM reward_accounts WHERE id = ?', [w.id]);
+        if (rows.length > 0) existing = rows[0];
+      }
+      if (!existing && memId) {
+        const rows = await queryMySQL<any>('SELECT id FROM reward_accounts WHERE membership_id = ?', [memId]);
+        if (rows.length > 0) existing = rows[0];
+      }
+
+      const createdAt = formatToMySQLDateTime(w.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(w.updatedAt) || createdAt;
+      const currency = w.currency || (w as any).currencyName || 'Points';
+
+      if (existing) {
+        await queryMySQL(
+          `UPDATE reward_accounts SET membership_id = ?, customer_id = ?, business_id = ?, balance = ?, currency = ?, currency_name = ?, status = ?, updated_at = ? WHERE id = ?`,
+          [memId, customerId, bizId, w.balance, currency, currency, w.status || 'ACTIVE', updatedAt, existing.id]
+        );
+        if (existing.id !== w.id) {
+          const oldId = w.id;
+          const realId = existing.id;
+          w.id = realId;
+          this.wallets.set(realId, w);
+          this.wallets.delete(oldId);
+
+          for (const tx of this.transactions) {
+            if (tx.rewardAccountId === oldId || (tx as any).walletId === oldId) {
+              tx.rewardAccountId = realId;
+              (tx as any).walletId = realId;
+            }
+          }
+        }
+      } else {
+        try {
+          await queryMySQL(
+            `INSERT INTO reward_accounts (id, membership_id, customer_id, business_id, balance, currency, currency_name, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [w.id, memId, customerId, bizId, w.balance, currency, currency, w.status || 'ACTIVE', createdAt, updatedAt]
+          );
+        } catch (colErr: any) {
+          await queryMySQL(
+            `INSERT INTO reward_accounts (id, membership_id, business_id, balance, currency, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [w.id, memId, bizId, w.balance, currency, updatedAt]
+          );
+        }
+      }
+    } catch (err: any) {
+      console.warn('Reward Account / Wallet MySQL sync failed:', err.message);
+    }
   }
 
-  private async persistTransaction(tx: RewardTransaction) {
+  private async persistTransaction(tx: RewardTransaction | WalletTransaction) {
     if (!this.isMySQLConnected) return;
+    const createdAt = formatToMySQLDateTime(tx.createdAt) || formatToMySQLDateTime(new Date());
+
     try {
-      await queryMySQL(
-        `INSERT INTO reward_transactions (id, reward_account_id, wallet_id, membership_id, business_id, branch_id, cashier_user_id, type, points, bill_amount, bill_number, reference, narration, balance_after, created_at, business_name, branch_name, cashier_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [tx.id, tx.rewardAccountId || tx.walletId, tx.walletId || tx.rewardAccountId, tx.membershipId, tx.businessId, tx.branchId, tx.cashierUserId, tx.type, tx.points, tx.billAmount, tx.billNumber || tx.reference, tx.reference, tx.narration, tx.balanceAfter, tx.createdAt, tx.businessName, tx.branchName, tx.cashierName]
-      );
-    } catch (e: any) { console.warn('Transaction MySQL sync failed:', e.message); }
+      // 1. Resolve business
+      let bizId = tx.businessId;
+      let bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [tx.businessId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(tx.businessId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [bizId]);
+      if (bRows.length === 0) {
+        console.warn(`Cannot persist transaction ${tx.id}: business ${bizId} not found in MySQL`);
+        return;
+      }
+      tx.businessId = bizId;
+
+      // 2. Resolve membership
+      let memId = tx.membershipId;
+      let mRows = await queryMySQL<any>('SELECT id FROM business_memberships WHERE id = ?', [tx.membershipId]);
+      if (mRows.length > 0) {
+        memId = mRows[0].id;
+      } else {
+        const mem = this.memberships.get(tx.membershipId);
+        if (mem) {
+          await this.persistMembership(mem);
+          memId = mem.id;
+        }
+      }
+      mRows = await queryMySQL<any>('SELECT id FROM business_memberships WHERE id = ?', [memId]);
+      if (mRows.length === 0) {
+        console.warn(`Cannot persist transaction ${tx.id}: membership ${memId} not found in MySQL`);
+        return;
+      }
+      tx.membershipId = memId;
+
+      // 3. Resolve wallet / reward account
+      let rewardAccountId = tx.rewardAccountId || (tx as any).walletId || `wal-${memId}`;
+      let walRows = await queryMySQL<any>('SELECT id FROM reward_accounts WHERE id = ?', [rewardAccountId]);
+      if (walRows.length === 0) {
+        const wal = this.wallets.get(rewardAccountId) || this.wallets.get((tx as any).walletId);
+        if (wal) {
+          await this.persistWallet(wal);
+          rewardAccountId = wal.id;
+        } else {
+          const accRows = await queryMySQL<any>('SELECT id FROM reward_accounts WHERE membership_id = ?', [memId]);
+          if (accRows.length > 0) {
+            rewardAccountId = accRows[0].id;
+          }
+        }
+      }
+      walRows = await queryMySQL<any>('SELECT id FROM reward_accounts WHERE id = ?', [rewardAccountId]);
+      if (walRows.length === 0) {
+        console.warn(`Cannot persist transaction ${tx.id}: reward_account ${rewardAccountId} not found in MySQL`);
+        return;
+      }
+      const walletId = (tx as any).walletId || rewardAccountId;
+
+      // 4. Resolve branch (if present)
+      let branchId = tx.branchId ?? null;
+      if (branchId) {
+        const brRows = await queryMySQL<any>('SELECT id FROM branches WHERE id = ?', [branchId]);
+        if (brRows.length === 0) {
+          const br = this.branches.get(branchId);
+          if (br) {
+            await this.persistBranch(br);
+            branchId = br.id;
+          } else {
+            branchId = null;
+          }
+        }
+      }
+
+      // 5. Resolve cashier user (if present)
+      let cashierUserId = tx.cashierUserId ?? (tx as any).employeeId ?? null;
+      if (cashierUserId) {
+        const uRows = await queryMySQL<any>('SELECT id FROM users WHERE id = ?', [cashierUserId]);
+        if (uRows.length === 0) {
+          const u = this.users.get(cashierUserId);
+          if (u) {
+            await this.persistUser(u);
+            cashierUserId = u.id;
+          } else {
+            cashierUserId = null;
+          }
+        }
+      }
+
+      try {
+        await queryMySQL(
+          `INSERT INTO reward_transactions (id, reward_account_id, wallet_id, membership_id, business_id, branch_id, cashier_user_id, type, points, bill_amount, bill_number, reference, narration, balance_after, created_at, business_name, branch_name, cashier_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE balance_after=VALUES(balance_after), narration=VALUES(narration)`,
+          [
+            tx.id,
+            rewardAccountId,
+            walletId,
+            memId,
+            bizId,
+            branchId,
+            cashierUserId,
+            tx.type,
+            tx.points,
+            tx.billAmount !== undefined && tx.billAmount !== null ? Number(tx.billAmount) : null,
+            tx.billNumber || tx.reference || null,
+            tx.reference || null,
+            tx.narration || null,
+            tx.balanceAfter,
+            createdAt,
+            tx.businessName || null,
+            tx.branchName || null,
+            tx.cashierName || null,
+          ]
+        );
+      } catch (e: any) {
+        await queryMySQL(
+          `INSERT INTO reward_transactions (id, reward_account_id, membership_id, business_id, branch_id, cashier_user_id, type, points, bill_amount, bill_number, reference, narration, balance_after, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE balance_after=VALUES(balance_after), narration=VALUES(narration)`,
+          [
+            tx.id,
+            rewardAccountId,
+            memId,
+            bizId,
+            branchId,
+            cashierUserId,
+            tx.type,
+            tx.points,
+            tx.billAmount !== undefined && tx.billAmount !== null ? Number(tx.billAmount) : null,
+            tx.billNumber || tx.reference || null,
+            tx.reference || null,
+            tx.narration || null,
+            tx.balanceAfter,
+            createdAt,
+          ]
+        );
+      }
+    } catch (err: any) {
+      console.warn('Transaction MySQL sync failed:', err.message);
+    }
   }
 
   private async persistOTP(otp: OTPRequest) {
     if (!this.isMySQLConnected) return;
     try {
+      const createdAt = formatToMySQLDateTime(otp.createdAt) || formatToMySQLDateTime(new Date());
+      const expiresAt = formatToMySQLDateTime(otp.expiresAt) || formatToMySQLDateTime(new Date(Date.now() + 5 * 60 * 1000));
       await queryMySQL(
         `INSERT INTO otp_requests (id, mobile_number, otp, type, expires_at, is_verified, attempts, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE is_verified=?, attempts=?`,
-        [otp.id, otp.mobileNumber, otp.otp, otp.type, otp.expiresAt, otp.isVerified ? 1 : 0, otp.attempts, otp.createdAt,
-         otp.isVerified ? 1 : 0, otp.attempts]
+         ON DUPLICATE KEY UPDATE is_verified=VALUES(is_verified), attempts=VALUES(attempts)`,
+        [otp.id, otp.mobileNumber, otp.otp, otp.type, expiresAt, otp.isVerified ? 1 : 0, otp.attempts ?? 0, createdAt]
       );
     } catch (e: any) { console.warn('OTP MySQL sync failed:', e.message); }
   }
@@ -332,10 +1074,12 @@ class LoyaltyDatabase {
   private async persistSMS(sms: SMSLog) {
     if (!this.isMySQLConnected) return;
     try {
+      const createdAt = formatToMySQLDateTime(sms.createdAt) || formatToMySQLDateTime(new Date());
       await queryMySQL(
         `INSERT INTO sms_logs (id, recipient_mobile, message, status, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [sms.id, sms.recipientMobile, sms.message, sms.status, sms.createdAt]
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status)`,
+        [sms.id, sms.recipientMobile, sms.message, sms.status || 'SENT', createdAt]
       );
     } catch (e: any) { console.warn('SMS MySQL sync failed:', e.message); }
   }
@@ -343,12 +1087,142 @@ class LoyaltyDatabase {
   private async persistAuditLog(log: AuditLog) {
     if (!this.isMySQLConnected) return;
     try {
+      let businessId = log.businessId ?? null;
+      if (businessId) {
+        const bizRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [businessId]);
+        if (bizRows.length === 0) businessId = null;
+      }
+
+      let actorUserId = log.actorUserId ?? null;
+      if (actorUserId) {
+        const uRows = await queryMySQL<any>('SELECT id FROM users WHERE id = ?', [actorUserId]);
+        if (uRows.length === 0) actorUserId = null;
+      }
+
+      const timestamp = formatToMySQLDateTime(log.timestamp) || formatToMySQLDateTime(new Date());
+      try {
+        await queryMySQL(
+          `INSERT INTO audit_logs (id, business_id, actor_user_id, actor_role, action, details, ip_address, timestamp, business_name, actor_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE details=VALUES(details), business_name=VALUES(business_name), actor_name=VALUES(actor_name)`,
+          [
+            log.id,
+            businessId,
+            actorUserId,
+            log.actorRole,
+            log.action,
+            log.details,
+            log.ipAddress || '127.0.0.1',
+            timestamp,
+            log.businessName ?? null,
+            log.actorName ?? null,
+          ]
+        );
+      } catch (e: any) {
+        await queryMySQL(
+          `INSERT INTO audit_logs (id, business_id, actor_user_id, actor_role, action, details, ip_address, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE details=VALUES(details)`,
+          [
+            log.id,
+            businessId,
+            actorUserId,
+            log.actorRole,
+            log.action,
+            log.details,
+            log.ipAddress || '127.0.0.1',
+            timestamp,
+          ]
+        );
+      }
+    } catch (err: any) {
+      console.warn('AuditLog MySQL sync failed:', err.message);
+    }
+  }
+
+  private async persistReward(r: Reward) {
+    if (!this.isMySQLConnected) return;
+    try {
+      let bizId = r.merchantId;
+      const bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [r.merchantId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(r.merchantId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      r.merchantId = bizId;
+
+      const createdAt = formatToMySQLDateTime(r.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(r.updatedAt) || createdAt;
+      const isActiveNum = r.status === 'INACTIVE' ? 0 : 1;
       await queryMySQL(
-        `INSERT INTO audit_logs (id, business_id, actor_user_id, actor_role, action, details, ip_address, timestamp, business_name, actor_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [log.id, log.businessId, log.actorUserId, log.actorRole, log.action, log.details, log.ipAddress, log.timestamp, log.businessName, log.actorName]
+        `INSERT INTO rewards (id, merchant_id, name, description, points_required, cash_value, type, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), points_required=VALUES(points_required), cash_value=VALUES(cash_value), type=VALUES(type), is_active=VALUES(is_active), updated_at=VALUES(updated_at)`,
+        [r.id, bizId, r.name, r.description ?? null, r.pointsRequired, r.cashValue ?? null, r.type, isActiveNum, createdAt, updatedAt]
       );
-    } catch (e: any) { console.warn('AuditLog MySQL sync failed:', e.message); }
+    } catch (e: any) { console.warn('Reward MySQL sync failed:', e.message); }
+  }
+
+  private async persistRedemption(rdm: Redemption) {
+    if (!this.isMySQLConnected) return;
+    try {
+      let bizId = rdm.merchantId;
+      const bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [rdm.merchantId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(rdm.merchantId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      rdm.merchantId = bizId;
+
+      const cust = this.customers.get(rdm.customerId);
+      if (cust) await this.persistCustomer(cust);
+
+      const createdAt = formatToMySQLDateTime(rdm.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(rdm.updatedAt) || createdAt;
+      await queryMySQL(
+        `INSERT INTO redemptions (id, merchant_id, customerId, customer_merchant_loyalty_account_id, reward_id, reward_name, reward_type, points_redeemed, cash_value, status, processed_by_employee_id, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status), processed_by_employee_id=VALUES(processed_by_employee_id), notes=VALUES(notes), updated_at=VALUES(updated_at)`,
+        [rdm.id, bizId, rdm.customerId, rdm.customerMerchantLoyaltyAccountId, rdm.rewardId, rdm.rewardName, rdm.rewardType, rdm.pointsRedeemed, rdm.cashValue ?? null, rdm.status, rdm.processedByEmployeeId ?? null, rdm.notes ?? null, createdAt, updatedAt]
+      );
+    } catch (e: any) { console.warn('Redemption MySQL sync failed:', e.message); }
+  }
+
+  private async persistMerchantSmsConfig(cfg: MerchantSmsConfiguration) {
+    if (!this.isMySQLConnected) return;
+    try {
+      let bizId = cfg.merchantId;
+      const bRows = await queryMySQL<any>('SELECT id FROM businesses WHERE id = ?', [cfg.merchantId]);
+      if (bRows.length > 0) {
+        bizId = bRows[0].id;
+      } else {
+        const biz = this.businesses.get(cfg.merchantId);
+        if (biz) {
+          await this.persistBusiness(biz);
+          bizId = biz.id;
+        }
+      }
+      cfg.merchantId = bizId;
+
+      const createdAt = formatToMySQLDateTime(cfg.createdAt) || formatToMySQLDateTime(new Date());
+      const updatedAt = formatToMySQLDateTime(cfg.updatedAt) || createdAt;
+      await queryMySQL(
+        `INSERT INTO merchant_sms_configs (id, merchant_id, provider, sender_id, dlt_entity_id, transaction_template_id, otp_template_id, welcome_template_id, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE provider=VALUES(provider), sender_id=VALUES(sender_id), dlt_entity_id=VALUES(dlt_entity_id), transaction_template_id=VALUES(transaction_template_id), otp_template_id=VALUES(otp_template_id), welcome_template_id=VALUES(welcome_template_id), enabled=VALUES(enabled), updated_at=VALUES(updated_at)`,
+        [cfg.id, bizId, cfg.provider, cfg.senderId, cfg.dlTEntityId ?? null, cfg.transactionTemplateId ?? null, cfg.otpTemplateId ?? null, cfg.welcomeTemplateId ?? null, cfg.enabled ? 1 : 0, createdAt, updatedAt]
+      );
+    } catch (e: any) { console.warn('MerchantSmsConfig MySQL sync failed:', e.message); }
   }
 
   // --- SEED INITIAL DATA FOR REALISTIC DEMO & TESTING ---
@@ -1457,15 +2331,14 @@ class LoyaltyDatabase {
     };
   }
 
-  // Transaction Ledger Engine (IMMUTABLE BALANCE COMPUTATION WITH MANDATORY BILL NUMBER & OTP VERIFICATION)
+  // Transaction Ledger Engine (IMMUTABLE BALANCE COMPUTATION WITH MANDATORY BILL NUMBER)
   public creditPoints(
     businessId: string,
     membershipId: string,
     billNumber: string,
     billAmount: number,
-    otp: string,
-    branchId: string | null,
-    cashierUserId: string | null
+    branchId: string | null = null,
+    cashierUserId: string | null = null
   ): { transaction: WalletTransaction; updatedWallet: Wallet } {
     const business = this.businesses.get(businessId);
     if (!business) throw new Error('Business tenant not found');
@@ -1482,20 +2355,11 @@ class LoyaltyDatabase {
     if (!billAmount || billAmount <= 0) {
       throw new Error('Mandatory positive Bill Amount is required to credit points');
     }
-    if (!otp || !otp.trim()) {
-      throw new Error('Customer verification OTP is required to credit points');
-    }
 
     const resolved = this.resolveCustomerAndMembership(membershipId, businessId);
     const membership = resolved.membership;
     const wallet = resolved.wallet;
     const customer = resolved.customer;
-
-    // Verify OTP
-    const otpCheck = otpService.verifyOTP(customer.mobileNumber, otp.trim());
-    if (!otpCheck.success) {
-      throw new Error(otpCheck.message || 'Invalid or expired customer verification OTP');
-    }
 
     // Calculate points: billAmount * (rewardPercentage / 100)
     const points = Math.floor((billAmount * business.rewardPercentage) / 100);
@@ -1545,7 +2409,7 @@ class LoyaltyDatabase {
       cashierUserId,
       cashier ? cashier.role : 'CASHIER',
       'POINTS_CREDITED',
-      `Credited +${points} points for Bill #${cleanBillNumber} (₹${billAmount.toLocaleString()}) to Customer ${customer.name} (+91 ${customer.mobileNumber}) verified via OTP`
+      `Credited +${points} points for Bill #${cleanBillNumber} (₹${billAmount.toLocaleString()}) to Customer ${customer.name} (+91 ${customer.mobileNumber})`
     );
 
     return { transaction, updatedWallet: wallet };
@@ -1825,6 +2689,7 @@ class LoyaltyDatabase {
       updatedAt: now,
     };
     this.rewards.set(id, reward);
+    this.persistReward(reward);
     return reward;
   }
 
@@ -1835,6 +2700,7 @@ class LoyaltyDatabase {
     }
     Object.assign(reward, data, { updatedAt: new Date().toISOString() });
     this.rewards.set(id, reward);
+    this.persistReward(reward);
     return reward;
   }
 
@@ -1892,6 +2758,7 @@ class LoyaltyDatabase {
       updatedAt: now,
     };
     this.redemptions.set(id, redemption);
+    this.persistRedemption(redemption);
     return redemption;
   }
 
@@ -1926,6 +2793,7 @@ class LoyaltyDatabase {
       wallet.balance = newBalance;
       wallet.updatedAt = new Date().toISOString();
       this.wallets.set(wallet.id, wallet);
+      this.persistWallet(wallet);
 
       // Ledger Transaction
       const biz = this.businesses.get(merchantId);
@@ -1952,6 +2820,7 @@ class LoyaltyDatabase {
         businessName: biz?.name,
       };
       this.transactions.unshift(tx);
+      this.persistTransaction(tx);
     }
 
     rdm.status = status;
@@ -1959,6 +2828,7 @@ class LoyaltyDatabase {
     rdm.notes = notes;
     rdm.updatedAt = new Date().toISOString();
     this.redemptions.set(redemptionId, rdm);
+    this.persistRedemption(rdm);
     return rdm;
   }
 
@@ -1988,6 +2858,7 @@ class LoyaltyDatabase {
       Object.assign(cfg, data, { updatedAt: now });
     }
     this.smsConfigs.set(merchantId, cfg);
+    this.persistMerchantSmsConfig(cfg);
     return cfg;
   }
 }

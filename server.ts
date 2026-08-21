@@ -1,5 +1,7 @@
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import { createServer as createViteServer } from 'vite';
 import { db } from './src/db/db';
@@ -7,10 +9,21 @@ import { UserRole } from './src/types';
 import { notificationService } from './src/services/notifications/NotificationService';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'loyalty_saas_jwt_secret_key_2026_super_secure';
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 const app = express();
 app.use(express.json());
+
+// Enable CORS for local cross-origin, WSL2 and external port proxies
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // --- EXTEND EXPRESS REQUEST FOR AUTH CONTEXT ---
 interface AuthenticatedRequest extends Request {
@@ -434,14 +447,29 @@ app.get(
   }
 );
 
-// Request Customer Verification OTP for Credit Points
+// Deprecated credit-otp endpoint for legacy callers (OTP is no longer required to credit points)
 app.post(
   '/api/v1/cashier/points/credit-otp',
   authenticateJWT,
   requireRoles('CASHIER', 'BRANCH_MANAGER', 'BUSINESS_OWNER'),
   (req: AuthenticatedRequest, res: Response) => {
+    return res.json({
+      success: true,
+      message: 'OTP is no longer required for issuing credit points.',
+      otp: 'NONE',
+    });
+  }
+);
+
+// Issue / Credit Points (Mandatory Bill Number + Amount; No OTP required)
+app.post(
+  '/api/v1/cashier/points/credit',
+  authenticateJWT,
+  requireRoles('CASHIER', 'BRANCH_MANAGER', 'BUSINESS_OWNER'),
+  (req: AuthenticatedRequest, res: Response) => {
     const { membershipId, billNumber, billAmount } = req.body;
     const businessId = req.businessId;
+    const branchId = req.employee?.branchId || null;
 
     if (!businessId) {
       return res.status(400).json({ success: false, error: 'No tenant context resolved for cashier' });
@@ -450,48 +478,7 @@ app.post(
     if (!membershipId || !billNumber || !billNumber.trim() || !billAmount || Number(billAmount) <= 0) {
       return res.status(400).json({
         success: false,
-        error: 'Membership ID, unique Bill Number, and valid positive Bill Amount are mandatory to request verification OTP',
-      });
-    }
-
-    try {
-      const result = db.requestCreditOTP(
-        businessId,
-        membershipId,
-        billNumber.trim(),
-        Number(billAmount)
-      );
-
-      return res.json({
-        success: true,
-        message: result.message,
-        otp: result.otp,
-        mobileNumber: result.mobileNumber,
-      });
-    } catch (err: any) {
-      return res.status(400).json({ success: false, error: err.message });
-    }
-  }
-);
-
-// Issue / Credit Points (Mandatory Bill Number + Amount + OTP)
-app.post(
-  '/api/v1/cashier/points/credit',
-  authenticateJWT,
-  requireRoles('CASHIER', 'BRANCH_MANAGER', 'BUSINESS_OWNER'),
-  (req: AuthenticatedRequest, res: Response) => {
-    const { membershipId, billNumber, billAmount, otp } = req.body;
-    const businessId = req.businessId;
-    const branchId = req.employee?.branchId || null;
-
-    if (!businessId) {
-      return res.status(400).json({ success: false, error: 'No tenant context resolved for cashier' });
-    }
-
-    if (!membershipId || !billNumber || !billNumber.trim() || !billAmount || Number(billAmount) <= 0 || !otp || !otp.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Mandatory fields missing: Membership ID, Bill Number, Bill Amount (> 0), and customer verification OTP are required.',
+        error: 'Mandatory fields missing: Membership ID, Bill Number, and positive Bill Amount (> 0) are required.',
       });
     }
 
@@ -501,7 +488,6 @@ app.post(
         membershipId,
         billNumber.trim(),
         Number(billAmount),
-        otp.trim(),
         branchId,
         req.user!.id
       );
@@ -1021,6 +1007,25 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Explicit fallback for client-side SPA routes (e.g. /, /login, /customer, /cashier, /merchant, /admin)
+    app.use('*', async (req: Request, res: Response, next: NextFunction) => {
+      if (req.originalUrl.startsWith('/api')) {
+        return next();
+      }
+      try {
+        const url = req.originalUrl;
+        const indexPath = path.resolve(process.cwd(), 'index.html');
+        let template = fs.readFileSync(indexPath, 'utf-8');
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e: any) {
+        if (vite && vite.ssrFixStacktrace) {
+          vite.ssrFixStacktrace(e);
+        }
+        next(e);
+      }
+    });
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
@@ -1029,12 +1034,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`=======================================================`);
     console.log(` Loyalty SaaS Platform Server running on port ${PORT}`);
-    console.log(` Database Mode: ${db.isMySQLConnected ? 'MySQL Real-time Persistence Active' : 'High-Performance In-Memory Seed Fallback'}`);
+    console.log(` Local App URL:    http://localhost:${PORT}`);
+    console.log(` Network App URL:  http://127.0.0.1:${PORT}`);
+    console.log(` Database Mode:    ${db.isMySQLConnected ? 'MySQL Real-time Persistence Active' : 'High-Performance In-Memory Seed Fallback'}`);
     console.log(` Multi-tenant isolated architecture ready`);
     console.log(`=======================================================`);
+  });
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[CRITICAL] Port ${PORT} is already in use by another application or server instance!`);
+      console.error(`-> Either stop the process occupying port ${PORT} or specify a different port in .env (e.g. PORT=3001)`);
+    } else {
+      console.error(`[CRITICAL] Express server encountered an error:`, err);
+    }
   });
 }
 

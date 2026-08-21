@@ -36,9 +36,6 @@ export const CashierDashboard: React.FC = () => {
   // Credit Points state
   const [billNumber, setBillNumber] = useState<string>('INV-2026-101');
   const [billAmount, setBillAmount] = useState<string>('1500');
-  const [creditOtpSent, setCreditOtpSent] = useState(false);
-  const [creditOtp, setCreditOtp] = useState('123456');
-  const [requestingCreditOtp, setRequestingCreditOtp] = useState(false);
   const [crediting, setCrediting] = useState(false);
   const [creditSuccess, setCreditSuccess] = useState<any | null>(null);
 
@@ -72,7 +69,6 @@ export const CashierDashboard: React.FC = () => {
     setScanning(true);
     setCreditSuccess(null);
     setRedeemSuccess(null);
-    setCreditOtpSent(false);
     setIsNewAutoMembership(false);
 
     try {
@@ -90,37 +86,16 @@ export const CashierDashboard: React.FC = () => {
     }
   };
 
-  // Request Customer Credit OTP
-  const handleRequestCreditOTP = async () => {
-    if (!membership || !billNumber.trim() || !billAmount || Number(billAmount) <= 0) {
-      setScanError('Please enter a valid mandatory Bill Number and positive Bill Amount');
-      return;
-    }
-
-    setRequestingCreditOtp(true);
-    setScanError(null);
-    try {
-      const res = await api.requestCreditOTP(membership.id, billNumber.trim(), Number(billAmount));
-      setCreditOtpSent(true);
-      setCreditOtp(res.otp);
-    } catch (err: any) {
-      setScanError(err.message || 'Credit OTP request failed');
-    } finally {
-      setRequestingCreditOtp(false);
-    }
-  };
-
-  // Verify OTP & Credit Points
+  // Issue / Credit Points (Direct - No OTP Required)
   const handleCreditPoints = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!membership || !billNumber.trim() || !billAmount || Number(billAmount) <= 0 || !creditOtp) return;
+    if (!membership || !billNumber.trim() || !billAmount || Number(billAmount) <= 0) return;
 
     setCrediting(true);
     setScanError(null);
     try {
-      const res = await api.creditPoints(membership.id, billNumber.trim(), Number(billAmount), creditOtp.trim());
+      const res = await api.creditPoints(membership.id, billNumber.trim(), Number(billAmount));
       setCreditSuccess(res.transaction);
-      setCreditOtpSent(false);
       // Auto-generate new unique bill number for next transaction
       setBillNumber(`INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
       // Refresh scanned membership info
@@ -349,118 +324,72 @@ export const CashierDashboard: React.FC = () => {
                     <span>Issue / Credit Loyalty Points</span>
                   </h3>
                   <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full dark:bg-emerald-950 dark:text-emerald-300">
-                    Audit Log & OTP Verified
+                    Direct Issuance • No OTP Needed
                   </span>
                 </div>
 
-                {!creditOtpSent ? (
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Mandatory Bill Number Field */}
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1">
-                          <span>Unique Bill Number</span>
-                          <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          id="cashier-bill-number-input"
-                          type="text"
-                          required
-                          value={billNumber}
-                          onChange={(e) => setBillNumber(e.target.value)}
-                          placeholder="e.g. INV-2026-101"
-                          className="w-full mt-1.5 px-4 py-3 border border-slate-300 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
-                        />
-                      </div>
-
-                      {/* Mandatory Bill Amount Field */}
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1">
-                          <span>Bill Amount (₹)</span>
-                          <span className="text-red-500">*</span>
-                        </label>
-                        <div className="mt-1.5 flex gap-2">
-                          <div className="relative flex-1">
-                            <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400 font-bold">
-                              ₹
-                            </span>
-                            <input
-                              id="cashier-bill-amount-input"
-                              type="number"
-                              min={1}
-                              required
-                              value={billAmount}
-                              onChange={(e) => setBillAmount(e.target.value)}
-                              placeholder="1500"
-                              className="w-full pl-7 pr-3 py-3 border border-slate-300 rounded-xl text-sm font-bold focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col justify-center px-3 rounded-xl bg-emerald-50 border border-emerald-100 dark:bg-emerald-950/50 dark:border-emerald-900 min-w-[90px] text-right">
-                            <span className="text-[10px] text-emerald-800 dark:text-emerald-300 uppercase font-bold">Points</span>
-                            <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
-                              +{calculatedPoints} Pts
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <button
-                      id="cashier-request-credit-otp-btn"
-                      onClick={handleRequestCreditOTP}
-                      disabled={requestingCreditOtp || !billNumber.trim() || !billAmount || Number(billAmount) <= 0}
-                      className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      {requestingCreditOtp ? 'Sending Verification OTP...' : `Request Customer Verification OTP (+${calculatedPoints} Pts)`}
-                    </button>
-                  </div>
-                ) : (
-                  <form onSubmit={handleCreditPoints} className="space-y-4">
-                    <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 dark:bg-emerald-950/60 dark:border-emerald-800 dark:text-emerald-300 space-y-1">
-                      <div className="font-bold text-emerald-950 dark:text-white flex items-center gap-1.5">
-                        <ShieldCheck className="h-4 w-4 text-emerald-600" />
-                        <span>OTP Verification Required for Bill #{billNumber}</span>
-                      </div>
-                      <div>
-                        Enter 6-digit OTP sent to customer (+91 {membership.customer?.mobileNumber}) to authorize credit of <span className="font-bold text-emerald-700 dark:text-emerald-300">+{calculatedPoints} Pts</span> for Bill Amount <span className="font-bold">₹{billAmount}</span>.
-                      </div>
-                    </div>
-
+                <form onSubmit={handleCreditPoints} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Mandatory Bill Number Field */}
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                        Customer Verification OTP
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                        <span>Unique Bill Number</span>
+                        <span className="text-red-500">*</span>
                       </label>
                       <input
-                        id="cashier-credit-otp-input"
+                        id="cashier-bill-number-input"
                         type="text"
-                        maxLength={6}
                         required
-                        value={creditOtp}
-                        onChange={(e) => setCreditOtp(e.target.value)}
-                        className="w-full mt-1.5 px-4 py-3 border border-slate-300 rounded-xl text-center font-mono text-lg tracking-widest focus:ring-2 focus:ring-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                        value={billNumber}
+                        onChange={(e) => setBillNumber(e.target.value)}
+                        placeholder="e.g. INV-2026-101"
+                        className="w-full mt-1.5 px-4 py-3 border border-slate-300 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
                       />
                     </div>
 
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setCreditOtpSent(false)}
-                        className="w-1/3 py-3 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
-                      >
-                        Cancel / Change
-                      </button>
-                      <button
-                        id="cashier-confirm-credit-btn"
-                        type="submit"
-                        disabled={crediting}
-                        className="w-2/3 py-3 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow transition flex items-center justify-center gap-2 disabled:opacity-50"
-                      >
-                        {crediting ? 'Verifying & Crediting...' : `Verify OTP & Credit +${calculatedPoints} Pts`}
-                      </button>
+                    {/* Mandatory Bill Amount Field */}
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                        <span>Bill Amount (₹)</span>
+                        <span className="text-red-500">*</span>
+                      </label>
+                      <div className="mt-1.5 flex gap-2">
+                        <div className="relative flex-1">
+                          <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400 font-bold">
+                            ₹
+                          </span>
+                          <input
+                            id="cashier-bill-amount-input"
+                            type="number"
+                            min={1}
+                            required
+                            value={billAmount}
+                            onChange={(e) => setBillAmount(e.target.value)}
+                            placeholder="1500"
+                            className="w-full pl-7 pr-3 py-3 border border-slate-300 rounded-xl text-sm font-bold focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                          />
+                        </div>
+
+                        <div className="flex flex-col justify-center px-3 rounded-xl bg-emerald-50 border border-emerald-100 dark:bg-emerald-950/50 dark:border-emerald-900 min-w-[90px] text-right">
+                          <span className="text-[10px] text-emerald-800 dark:text-emerald-300 uppercase font-bold">Points</span>
+                          <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
+                            +{calculatedPoints} Pts
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                  </form>
-                )}
+                  </div>
+
+                  <button
+                    id="cashier-confirm-credit-btn"
+                    type="submit"
+                    disabled={crediting || !billNumber.trim() || !billAmount || Number(billAmount) <= 0}
+                    className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <Zap className="h-4 w-4" />
+                    {crediting ? 'Crediting Points...' : `Issue & Credit +${calculatedPoints} Pts`}
+                  </button>
+                </form>
 
                 {creditSuccess && (
                   <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1.5 dark:bg-emerald-950/60 dark:border-emerald-800 dark:text-emerald-200">
@@ -472,9 +401,9 @@ export const CashierDashboard: React.FC = () => {
                     <div>Ref Code: <span className="font-mono font-bold">{creditSuccess.reference}</span></div>
                     <div>Narration: {creditSuccess.narration}</div>
                     <div>Updated Balance: <span className="font-bold">{creditSuccess.balanceAfter} Points</span></div>
-                    <div className="text-[11px] text-emerald-700 font-semibold flex items-center gap-1 mt-1">
+                    <div className="text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold flex items-center gap-1 mt-1">
                       <ShieldCheck className="h-3.5 w-3.5" />
-                      <span>Verified via Customer OTP • Audit Log Recorded</span>
+                      <span>Direct Credit Issued • Instant SMS Sent • Audit Log Recorded</span>
                     </div>
                   </div>
                 )}

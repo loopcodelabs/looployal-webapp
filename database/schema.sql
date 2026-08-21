@@ -3,11 +3,6 @@
 -- Target Database: MySQL 8.0+ / MariaDB 10.5+
 -- ====================================================================
 
-CREATE DATABASE IF NOT EXISTS `loyalty_saas_db` 
-  DEFAULT CHARACTER SET utf8mb4 
-  COLLATE utf8mb4_unicode_ci;
-
-USE `loyalty_saas_db`;
 
 -- --------------------------------------------------------------------
 -- 1. USERS TABLE
@@ -76,6 +71,7 @@ CREATE TABLE IF NOT EXISTS `employees` (
   `branch_id` VARCHAR(64) NULL,
   `role` ENUM('BUSINESS_OWNER', 'BRANCH_MANAGER', 'CASHIER') NOT NULL,
   `employee_code` VARCHAR(64) NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   CONSTRAINT `fk_employees_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_employees_business` FOREIGN KEY (`business_id`) REFERENCES `businesses` (`id`) ON DELETE CASCADE,
@@ -94,9 +90,11 @@ CREATE TABLE IF NOT EXISTS `customers` (
   `mobile_number` VARCHAR(20) NOT NULL UNIQUE,
   `name` VARCHAR(191) NOT NULL,
   `email` VARCHAR(191) NULL,
+  `universal_qr_code` VARCHAR(128) NULL,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   CONSTRAINT `fk_customers_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
-  INDEX `idx_customers_mobile` (`mobile_number`)
+  INDEX `idx_customers_mobile` (`mobile_number`),
+  INDEX `idx_customers_qr` (`universal_qr_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- --------------------------------------------------------------------
@@ -124,8 +122,10 @@ CREATE TABLE IF NOT EXISTS `business_memberships` (
 CREATE TABLE IF NOT EXISTS `reward_accounts` (
   `id` VARCHAR(64) NOT NULL PRIMARY KEY,
   `membership_id` VARCHAR(64) NOT NULL UNIQUE,
+  `customer_id` VARCHAR(64) NULL,
   `business_id` VARCHAR(64) NOT NULL,
   `balance` INT NOT NULL DEFAULT 0,
+  `currency` VARCHAR(32) NOT NULL DEFAULT 'Points',
   `currency_name` VARCHAR(32) NOT NULL DEFAULT 'Points',
   `status` ENUM('ACTIVE', 'LOCKED') NOT NULL DEFAULT 'ACTIVE',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS `reward_accounts` (
 CREATE TABLE IF NOT EXISTS `reward_transactions` (
   `id` VARCHAR(64) NOT NULL PRIMARY KEY,
   `reward_account_id` VARCHAR(64) NOT NULL,
+  `wallet_id` VARCHAR(64) NULL,
   `membership_id` VARCHAR(64) NOT NULL,
   `business_id` VARCHAR(64) NOT NULL,
   `branch_id` VARCHAR(64) NULL,
@@ -153,6 +154,9 @@ CREATE TABLE IF NOT EXISTS `reward_transactions` (
   `reference` VARCHAR(128) NOT NULL,
   `narration` TEXT NOT NULL,
   `balance_after` INT NOT NULL,
+  `business_name` VARCHAR(255) NULL,
+  `branch_name` VARCHAR(255) NULL,
+  `cashier_name` VARCHAR(255) NULL,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   CONSTRAINT `fk_tx_reward_account` FOREIGN KEY (`reward_account_id`) REFERENCES `reward_accounts` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_tx_membership` FOREIGN KEY (`membership_id`) REFERENCES `business_memberships` (`id`) ON DELETE CASCADE,
@@ -193,6 +197,8 @@ CREATE TABLE IF NOT EXISTS `audit_logs` (
   `details` TEXT NOT NULL,
   `ip_address` VARCHAR(45) NOT NULL DEFAULT '127.0.0.1',
   `timestamp` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `business_name` VARCHAR(255) NULL,
+  `actor_name` VARCHAR(255) NULL,
   INDEX `idx_audit_business` (`business_id`),
   INDEX `idx_audit_timestamp` (`timestamp`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -208,6 +214,83 @@ CREATE TABLE IF NOT EXISTS `sms_logs` (
   `status` ENUM('SENT', 'DELIVERED') NOT NULL DEFAULT 'SENT',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   INDEX `idx_sms_mobile` (`recipient_mobile`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------------------
+-- 12. NOTIFICATIONS QUEUE TABLE
+-- --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `notifications_queue` (
+  `id` VARCHAR(64) NOT NULL PRIMARY KEY,
+  `recipient_mobile` VARCHAR(20) NOT NULL,
+  `type` VARCHAR(50) NOT NULL,
+  `message` TEXT NOT NULL,
+  `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  `provider` VARCHAR(50) NOT NULL,
+  `attempts` INT NOT NULL DEFAULT 0,
+  `max_attempts` INT NOT NULL DEFAULT 3,
+  `error` TEXT NULL,
+  `message_id` VARCHAR(100) NULL,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `sent_at` DATETIME(3) NULL,
+  `failed_at` DATETIME(3) NULL,
+  INDEX `idx_notif_mobile` (`recipient_mobile`),
+  INDEX `idx_notif_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------------------
+-- 13. REWARDS CATALOG TABLE
+-- --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `rewards` (
+  `id` VARCHAR(64) NOT NULL PRIMARY KEY,
+  `merchant_id` VARCHAR(64) NOT NULL,
+  `name` VARCHAR(255) NOT NULL,
+  `description` TEXT NULL,
+  `points_required` INT NOT NULL,
+  `cash_value` DECIMAL(10,2) NULL,
+  `type` VARCHAR(50) NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  INDEX `idx_rewards_merchant` (`merchant_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------------------
+-- 14. REDEMPTIONS TABLE
+-- --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `redemptions` (
+  `id` VARCHAR(64) NOT NULL PRIMARY KEY,
+  `merchant_id` VARCHAR(64) NOT NULL,
+  `customerId` VARCHAR(64) NOT NULL,
+  `customer_merchant_loyalty_account_id` VARCHAR(64) NOT NULL,
+  `reward_id` VARCHAR(64) NOT NULL,
+  `reward_name` VARCHAR(255) NOT NULL,
+  `reward_type` VARCHAR(50) NOT NULL,
+  `points_redeemed` INT NOT NULL,
+  `cash_value` DECIMAL(10,2) NULL,
+  `status` VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+  `processed_by_employee_id` VARCHAR(64) NULL,
+  `notes` TEXT NULL,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  INDEX `idx_redemptions_merchant` (`merchant_id`),
+  INDEX `idx_redemptions_customer` (`customerId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------------------
+-- 15. MERCHANT SMS CONFIGS TABLE
+-- --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `merchant_sms_configs` (
+  `id` VARCHAR(64) NOT NULL PRIMARY KEY,
+  `merchant_id` VARCHAR(64) NOT NULL UNIQUE,
+  `provider` VARCHAR(50) NOT NULL,
+  `sender_id` VARCHAR(50) NOT NULL,
+  `dlt_entity_id` VARCHAR(100) NULL,
+  `transaction_template_id` VARCHAR(100) NULL,
+  `otp_template_id` VARCHAR(100) NULL,
+  `welcome_template_id` VARCHAR(100) NULL,
+  `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ====================================================================
@@ -273,8 +356,8 @@ VALUES
 ('mem-cust1-bp', 'cust-01', 'biz-bpcl-04', 'MEM-BPCL-9876543210', 'ACTIVE')
 ON DUPLICATE KEY UPDATE `status` = VALUES(`status`);
 
--- Wallets for Customer 1
-INSERT INTO `wallets` (`id`, `membership_id`, `business_id`, `balance`, `currency_name`, `status`)
+-- Reward Accounts for Customer 1
+INSERT INTO `reward_accounts` (`id`, `membership_id`, `business_id`, `balance`, `currency_name`, `status`)
 VALUES
 ('wal-cust1-io', 'mem-cust1-io', 'biz-ioc-01', 850, 'Points', 'ACTIVE'),
 ('wal-cust1-par', 'mem-cust1-par', 'biz-par-02', 1200, 'Points', 'ACTIVE'),
@@ -282,8 +365,8 @@ VALUES
 ('wal-cust1-bp', 'mem-cust1-bp', 'biz-bpcl-04', 620, 'Points', 'ACTIVE')
 ON DUPLICATE KEY UPDATE `balance` = VALUES(`balance`);
 
--- Transactions for Customer 1
-INSERT INTO `wallet_transactions` (`id`, `wallet_id`, `membership_id`, `business_id`, `branch_id`, `cashier_user_id`, `type`, `points`, `bill_amount`, `reference`, `narration`, `balance_after`)
+-- Reward Transactions for Customer 1
+INSERT INTO `reward_transactions` (`id`, `reward_account_id`, `membership_id`, `business_id`, `branch_id`, `cashier_user_id`, `type`, `points`, `bill_amount`, `reference`, `narration`, `balance_after`)
 VALUES
 ('tx-001', 'wal-cust1-io', 'mem-cust1-io', 'biz-ioc-01', 'br-io-01', 'usr-io-cashier', 'CREDIT', 250, 5000.00, 'BILL-IOCL-1029', 'Points earned for fuel refill of ₹5,000', 850),
 ('tx-002', 'wal-cust1-par', 'mem-cust1-par', 'biz-par-02', 'br-par-01', NULL, 'CREDIT', 400, 4000.00, 'BILL-PAR-8831', 'Points earned for dining order of ₹4,000', 1200),

@@ -1,4 +1,5 @@
 import { ISMSProvider, NotificationRecord, NotificationStatus, SMSPayload } from './types';
+import { queryMySQL, formatToMySQLDateTime } from '../../db/mysql';
 
 export class NotificationQueue {
   private queue: NotificationRecord[] = [];
@@ -17,6 +18,45 @@ export class NotificationQueue {
     this.fallbackProvider = fallback;
   }
 
+  private async persistNotification(record: NotificationRecord) {
+    try {
+      const createdAt = formatToMySQLDateTime(record.createdAt) || formatToMySQLDateTime(new Date());
+      const sentAt = formatToMySQLDateTime(record.sentAt);
+      const failedAt = formatToMySQLDateTime(record.failedAt);
+      await queryMySQL(
+        `INSERT INTO notifications_queue (id, recipient_mobile, type, message, status, provider, attempts, max_attempts, error, message_id, created_at, sent_at, failed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status), provider=VALUES(provider), attempts=VALUES(attempts), error=VALUES(error), message_id=VALUES(message_id), sent_at=VALUES(sent_at), failed_at=VALUES(failed_at)`,
+        [
+          record.id,
+          record.recipientMobile,
+          record.type,
+          record.message,
+          record.status,
+          record.provider,
+          record.attempts,
+          record.maxAttempts,
+          record.error ?? null,
+          record.messageId ?? null,
+          createdAt,
+          sentAt,
+          failedAt,
+        ]
+      );
+
+      if (record.status === 'SENT') {
+        await queryMySQL(
+          `INSERT INTO sms_logs (id, recipient_mobile, message, status, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE status=VALUES(status)`,
+          [record.id, record.recipientMobile, record.message, 'SENT', createdAt]
+        );
+      }
+    } catch {
+      // Non-blocking if MySQL persistence is offline
+    }
+  }
+
   /**
    * Enqueues a notification to be processed asynchronously in the background.
    */
@@ -28,6 +68,8 @@ export class NotificationQueue {
     if (this.history.length > 500) {
       this.history = this.history.slice(0, 500);
     }
+
+    this.persistNotification(record);
 
     // Trigger queue processing asynchronously (non-blocking)
     setImmediate(() => this.processQueue());
@@ -86,6 +128,7 @@ export class NotificationQueue {
         record.sentAt = new Date().toISOString();
         record.messageId = response.messageId;
         console.log(`[NotificationQueue] Successfully sent ${record.type} notification to ${record.recipientMobile} via ${activeProvider.name}.`);
+        this.persistNotification(record);
       } else {
         // If primary provider failed and fallback is available and hasn't been tried yet
         if (activeProvider !== this.fallbackProvider && this.fallbackProvider) {
@@ -96,6 +139,7 @@ export class NotificationQueue {
             record.sentAt = new Date().toISOString();
             record.provider = this.fallbackProvider.name;
             record.messageId = fallbackRes.messageId;
+            this.persistNotification(record);
             return;
           }
         }
@@ -104,6 +148,7 @@ export class NotificationQueue {
         if (record.attempts < record.maxAttempts) {
           record.status = 'RETRYING';
           console.warn(`[NotificationQueue] Notification dispatch failed (Attempt ${record.attempts}/${record.maxAttempts}). Will retry in background...`);
+          this.persistNotification(record);
           // Re-queue with slight delay
           setTimeout(() => {
             this.queue.push(record);
@@ -113,6 +158,7 @@ export class NotificationQueue {
           record.status = 'FAILED';
           record.failedAt = new Date().toISOString();
           console.error(`[NotificationQueue] Notification dispatch permanently FAILED for ${record.recipientMobile} after ${record.attempts} attempts: ${record.error}`);
+          this.persistNotification(record);
         }
       }
     } catch (err: any) {
@@ -120,6 +166,7 @@ export class NotificationQueue {
       record.status = 'FAILED';
       record.failedAt = new Date().toISOString();
       console.error(`[NotificationQueue] Exception processing notification:`, err);
+      this.persistNotification(record);
     }
   }
 }
