@@ -33,7 +33,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
           <div className="mx-auto max-w-3xl text-center">
             <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300">
               <Sparkles className="h-3.5 w-3.5" />
-              <span>Multi-Tenant Loyalty-as-a-Service SaaS</span>
+              <span>Multi-Tenant Loyalty Service SaaS</span>
             </div>
             
             <h1 className="mt-6 text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl text-slate-900 dark:text-white">
